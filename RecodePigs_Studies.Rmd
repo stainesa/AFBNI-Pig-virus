@@ -1,0 +1,97 @@
+---
+title: "AFBINI work"
+author: "Anthony Staines"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+fontsize: 10pt
+output:
+  pdf_document:
+    fig_caption: yes
+    highlight: tango
+    latex_engine: xelatex
+    number_sections: yes
+    toc: yes
+  word_document:
+    fig_caption: yes
+    toc: yes
+  html_document: 
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+#Libraries
+library(knitr)
+library(pander)
+library(broom)
+library(readxl)
+library(psych) # describe
+library(magrittr)
+library(stargazer)
+library(broom)
+library(poLCA)
+library(tidyverse)
+
+#Options
+knitr::opts_chunk$set(echo = FALSE, results = 'hide', message = FALSE, warning = FALSE, cache = TRUE)
+
+#Excel origin
+    d0 <- as.Date(0, origin="1899-12-10", tz='UTC')
+    rm(d0) # Not used here
+
+panderOptions("digits", 3)
+panderOptions("table.split.table",Inf)
+
+set.seed(324127)
+
+opts_chunk$set(cache.extra = rand_seed)
+
+```
+
+# Read
+
+```{r read data}
+Sheets <- excel_sheets('Data/CHAPTER 1 NOVEL PPV  pl 201117 v3 WORKING COPY.xlsx')
+Pig <- read_excel('Data/CHAPTER 1 NOVEL PPV  pl 201117 v3 WORKING COPY.xlsx',
+                  sheet=Sheets[1])
+Names <- read_excel('Data/CHAPTER 1 NOVEL PPV  pl 201117 v3 WORKING COPY.xlsx',
+                  sheet=Sheets[4])
+        names(Pig) <- Names$Final
+rm(Sheets, Names)
+```
+
+# Recode as per email from Paula Lagan 2019-06-11
+ 
+```{r Recode Studies}
+table(Pig$Sample_Origin)
+Pig <- Pig %>%
+    mutate(Sample_Origin = 
+               recode(Pig$Sample_Origin,
+       "Merial"             =   "Study A",
+       "PM submission"      =   "Study B",
+       "Warwick Study"      =   "Study C",
+       "North-South survey" =   "Study D",
+       "DARD NDR"           =   "Study E",
+       "MLC study"          =   "Study F",
+       "VSD"                =   "Study G",
+       "IDD"                =   "Study H",
+       "Exp studies"        =   "Study I"
+               )
+    )
+
+table(Pig$Sample_Origin)
+```
+
+# Write out the recoded data file for further use
+
+```{r}
+
+write_csv(Pig, path = 'Data/Pig_Recoded.csv')
+
+```

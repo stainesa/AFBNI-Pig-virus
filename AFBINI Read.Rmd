@@ -1,0 +1,2015 @@
+---
+title: "AFBINI work"
+author: "Anthony Staines"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+fontsize: 10pt
+output:
+  pdf_document:
+    fig_caption: yes
+    highlight: tango
+    latex_engine: xelatex
+    number_sections: yes
+    toc: yes
+  word_document:
+    fig_caption: yes
+    toc: yes
+  html_document: 
+    fig_caption: yes
+    number_sections: yes
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+#Libraries
+library(knitr)
+library(pander)
+library(broom)
+library(readxl)
+library(psych) # describe
+library(magrittr)
+library(stargazer)
+library(broom)
+library(poLCA)
+library(tidyverse)
+
+#Options
+knitr::opts_chunk$set(echo = FALSE, results = 'hide', message = FALSE, warning = FALSE, cache = TRUE)
+
+#Excel origin
+    d0 <- as.Date(0, origin="1899-12-10", tz='UTC')
+    rm(d0) # Not used here
+
+panderOptions("digits", 3)
+panderOptions("table.split.table",Inf)
+
+set.seed(324127)
+
+opts_chunk$set(cache.extra = rand_seed)
+
+```
+
+# Read
+
+```{r read data}
+# Run the file RecodePigs_Studies.Rmd to generate this from the data file 'Data/CHAPTER 1 NOVEL PPV  pl 201117 v3 WORKING COPY.xlsx'
+Pig  <-  read_csv('Data/Pig_Recoded.csv')
+```
+
+Print a short summary of each variable
+ 
+```{r describe}
+Pig %>%
+    keep(is.numeric) %>%
+    describe()
+Pig %>% glimpse()
+```
+
+Generate some lists of variable for later use
+
+```{r Lists of variables}
+Symptoms <- names(Pig %>% select(Wasting:Aborted))
+Viruses_CT <- names(Pig %>% select(contains('_CT')))
+Viruses_SQ <- names(Pig %>% select(contains('_SQ')))
+Viruses_Count <- c(names(Pig %>% select(contains('_Count'))))
+
+```
+
+The Count variables are the key viral exposure variables.
+
+## Clean up Age Group
+
+```{r Clean up Age}
+# Boar   fattener    fattner     foetus   neonatal pre-weaner        sow     weaner 
+
+Pig$Age_group.2 <- recode(Pig$Age_group,
+                          'Boar'  =   'Boar',
+                          'fattener'  =   'Fattener',
+                          'fattner'   = 'Fattener',
+                          'foetus'    =  'Foetus',
+                          'neonatal'  =   'Neonatal',
+                          'pre-weaner' =  'Pre-weaner',
+                          'sow'       =  'Sow',
+                          'weaner'    =  'Weaner')
+table(Pig$Age_group,Pig$Age_group.2)
+
+Pig$Age <- factor(Pig$Age_group.2,levels=c('Foetus','Neonatal','Pre-weaner','Weaner','Fattener','Boar','Sow'),ordered=TRUE)
+table(Pig$Age,Pig$Age_group)
+
+# Codes per Paul email Feb 2019
+# 0)      Foetus/ Neonatal
+# 1)      Pre-weaner
+# 2)      Weaner
+# 3)      Fattener, Sow, Boar
+
+Pig$Ages <- recode(Pig$Age_group.2,
+                   'Foetus' = 0,
+                   'Neonatal' = 0,
+                   'Pre-weaner' = 1,
+                   'Weaner' = 2,
+                   'Fattener' = 3,
+                   'Boar' = 3,
+                   'Sow' = 3
+                   )
+
+table(Pig$Age,Pig$Ages)
+```
+
+```{r , results='asis'}
+pander(table(Pig$Ages,Pig$Age_group.2))
+```
+
+## Summary
+
+### Table 1 count of findings, signs and symptoms
+
+A total of 25 different pathological findings, physical signs and symptoms were recorded in the data set.
+
+```{r Count Symptoms}
+
+Present <- Pig %>% select(Symptoms) %>%
+    colSums(na.rm=TRUE) # Sympoms present
+
+Absent <- Pig %>% select(Symptoms) %>% 
+    mutate_all(funs(ifelse(.==0,1,0))) %>%
+    colSums(na.rm=TRUE) # Symptoms not present
+
+Total <- Present + Absent
+Percent <- paste0(round(100*Present/Total,1),'%')
+p <- rbind(Present,Absent,Total,Percent)
+#t(p)
+p <- fix_data_frame(t(p))
+
+names(p)[1] <- 'Symptom'
+```
+
+```{r, results='asis'}
+pander(p, caption = 'Table of symptoms recorded')
+    #rm(p,Present,Absent,Total,Percent)
+```
+
+Another important question to ask is how many animals had identified symptoms or signs reported, and how many signs and symptoms these animals had.
+
+```{r Count numbers of pigs with symptoms}
+count_na <- function(x) sum(is.na(x))
+
+S <-Pig %>% # Individual Pig level - total symptoms recorded, and number missing
+    select(Number,Sample_Origin,Symptoms) %>%
+    mutate(Total = rowSums(. == 1, na.rm=TRUE)) %>%
+    mutate(count_na = apply(., 1, count_na)) %>%
+    arrange(desc(Total))
+
+
+Pig <- Pig %>%
+    inner_join((S %>% select(Number,Sample_Origin,Total,count_na)), by = c("Number", "Sample_Origin"))
+
+S <- S %>%
+    filter(count_na < length(Symptoms)) # Remove all rows with all symptoms missing
+
+Summary.Symptoms <- S %>%
+    group_by(Sample_Origin) %>%
+    summarise(Average = mean(Total),
+              Min = min(Total), Max=max(Total),
+              Sum = sum(Total),
+              Missing=round(mean(100*count_na/Sum),2)) %>%
+    arrange(Average) %>%
+    select(-Sum)
+
+S <- S %>%
+    mutate(Study = factor(Sample_Origin,
+                          levels=rev(Summary.Symptoms$Sample_Origin))) # Put Study in order of decreasing average
+
+g <- ggplot(S,aes(y=Total,x=Study,fill=Study,colour=Study)) +
+    geom_boxplot(varwidth = TRUE) +
+    guides(colour = FALSE,fill = FALSE) +
+    scale_y_continuous(breaks = seq(0, 15, by = 2)) +
+    theme_bw() +
+    theme(text = element_text(size = 16)) +
+    theme(axis.text.x = element_text(angle = -45, hjust=0,vjust = 0.5,size = 14)) +
+    ggtitle('Number of symptoms, signs and findings reported per pig studied.')
+
+print(g)
+
+ggsave(g,filename = 'Images/SymptomsperPig.png',width=40,height=20,unit=c('cm'), dpi=600)
+
+```
+
+Only 272 pigs had any signs, symptoms or findings recorded.
+
+```{r, results = 'asis'}
+pander(Summary.Symptoms,caption='Table summarising the reported numbers symptoms signs and findings by study, and the proportion of animals on whom none were recorded for each study')
+
+rm(Summary.Symptoms,S)
+```
+
+### Table 2 Count of viral results
+
+Seven different viral analyses were performed. The overall results for these are shown in this table.
+
+```{r Count viruses}
+
+Present <- Pig %>% select(Viruses_Count) %>%
+    colSums(na.rm=TRUE) # Viruses present
+
+
+Absent <- Pig %>% select(Viruses_Count) %>% 
+    mutate_all(funs(ifelse(.==0,1,0))) %>%
+    colSums(na.rm=TRUE) # Viruses not present
+
+Total <- Present + Absent
+Percent <- paste0(round(100*Present/Total,1),'%')
+p <- rbind(Present,Absent,Total,Percent)
+#t(p)
+p <- fix_data_frame(t(p))
+
+names(p)[1] <- 'Viruses'
+```
+
+```{r , results='asis'}
+pander(p, caption = 'Table of viruses detected')
+    rm(p,Present,Absent,Total,Percent)
+```
+
+
+### Table 3 Count of studies
+
+This work includes a number of different types of materials from several different studies. Each study provided a different set of materials for analysis.
+
+```{r Studies included, results='asis'}
+
+t0 <- addmargins(table(Pig$Sample_Origin))
+  Row.Order <- order(t0,decreasing=TRUE) #decreasing order of column, but puts Sum first..
+        Row.Order <-  c(Row.Order[2:10],Row.Order[1]) # Now puts sum last
+pander(t0[Row.Order], caption = 'Origins of material analysed for evidence of viral infection')
+rm(t0,Row.Order)
+```
+
+```{r Studies and samples included, results='asis'}
+
+t <- table(Pig$Sample_Origin,Pig$Sample_Basic, useNA = 'ifany')
+t <- addmargins(t)
+#Order by columns
+    Column.Order <- order(t[10,],decreasing=TRUE) #decreasing order of column, but puts Sum first..
+        Column.Order <-  c(Column.Order[2:10],Column.Order[1]) # Now puts sum last
+#Order by rows
+    Row.Order <- order(t[,10],decreasing=TRUE) #decreasing order of column, but puts Sum first..
+        Row.Order <-  c(Row.Order[2:10],Row.Order[1]) # Now puts sum last
+
+        pander(t[Row.Order,Column.Order], caption = 'Origins and types of material analysed for evidence of viral infection')
+        rm(t,Row.Order,Column.Order)
+```
+
+##Viruses by Studies
+
+```{r Count viruses by Studies}
+
+Present <- Pig %>% select(Viruses_Count,Sample_Origin) %>%
+    group_by(Sample_Origin) %>%
+    summarize_all(funs(sum(.,na.rm=TRUE))) %>%
+    gather(Virus,Present,-Sample_Origin)
+
+Absent <- Pig %>% select(Viruses_Count,Sample_Origin) %>%
+    group_by(Sample_Origin) %>%
+    mutate_all(funs(ifelse(.==0,1,0))) %>%
+    summarize_all(funs(sum(.,na.rm=TRUE))) %>%
+    gather(Virus,Absent,-Sample_Origin)
+
+Total <- Present %>% inner_join(Absent) %>%
+    mutate(Total = Present+Absent) %>%
+    mutate(Percent =  paste0(round(100*Present/Total,1),'%')) %>%
+    filter(Total>0)
+
+Total %>% select(Sample_Origin,Virus,Total) %>%
+    spread(Virus,Total,drop=FALSE,fill='') %>%
+    select(Sample_Origin, PCV2_Count, PPV2_Count, PPV3_Count, PPV4_Count,
+           NI_BOCA_Count, SW_BOCA_Count, PPV_Count) %>%
+    pander(caption='Virus results (number tested) by study and virus type')
+
+Total %>% select(Sample_Origin,Virus,Percent) %>%
+    spread(Virus,Percent,drop=FALSE,fill='') %>%
+    select(Sample_Origin, PCV2_Count, PPV2_Count, PPV3_Count, PPV4_Count,
+           NI_BOCA_Count, SW_BOCA_Count, PPV_Count)
+```
+
+```{r, results='asis'}
+Total %>%
+    pander(caption='Virus results (percentage positive) by study and virus type')
+rm(Total,Absent,Present)
+```
+
+## Two checks
+Are there between study differences in the virus results?
+
+### PCV2
+
+```{r, results='asis'}
+PCV2 <- glm(PCV2_Count ~ Sample_Origin,data=(Pig %>% filter(Sample_Origin != 'Exp studies')),family='binomial')
+
+    pander(summary(PCV2),caption = 'Between study variability in PCV2 detection')
+```
+
+##PPV2
+
+```{r, results='asis'}
+PPV2 <- glm(PPV2_Count ~ Sample_Origin,data=(Pig %>% filter(Sample_Origin != 'Exp studies')),family='binomial')
+
+    pander(summary(PPV2),caption = 'Between study variability in PPV2 detection')
+```
+
+##PPV3
+
+```{r, results='asis'}
+PPV3 <- glm(PPV3_Count ~ Sample_Origin,data=(Pig %>% filter(Sample_Origin != 'Exp studies')),family='binomial')
+
+    pander(summary(PPV3),caption = 'Between study variability in PPV3 detection')
+```
+
+##PPV4
+
+```{r, results='asis'}
+PPV4 <- glm(PPV4_Count ~ Sample_Origin,data=(Pig %>% filter(Sample_Origin != 'Exp studies')),family='binomial')
+
+    pander(summary(PPV4),caption = 'Between study variability in PPV4 detection')
+    
+rm(PCV2,PPV2,PPV3,PPV4)
+```
+
+There are too few PPV positive tests to ask this question, and the BOCA virus tests were only done in one study. For each of the other viruses the answer is yes - there are large differences between the studies in the proportion of samples positive for the virus.
+
+Are there between study differences in the symptoms recorded?
+
+```{r Table of Symptoms by studies}
+
+Present <- Pig %>% select(Symptoms,Sample_Origin) %>%
+    group_by(Sample_Origin) %>%
+    summarize_all(funs(sum(.,na.rm=TRUE))) %>%
+    gather(Symptoms,Present,-Sample_Origin)
+
+Absent <- Pig %>% select(Symptoms,Sample_Origin) %>%
+    group_by(Sample_Origin) %>%
+    mutate_all(funs(ifelse(.==0,1,0))) %>%
+    summarize_all(funs(sum(.,na.rm=TRUE))) %>%
+    gather(Symptoms,Absent,-Sample_Origin)
+
+Total <- Present %>% inner_join(Absent) %>%
+    mutate(Total = Present+Absent) %>%
+    mutate(Percent =  paste0(round(100*Present/Total,1),'%')) %>%
+    filter(Total>0 & Present > 0)
+```
+
+```{r Symptom by study number, results = 'asis'}
+
+Total %>% select(Sample_Origin,Symptoms,Total) %>%
+    spread(Sample_Origin,Total,drop=FALSE,fill='') %>%
+    select(Symptoms, `Study A`, `Study B`, `Study D`,
+           `Study E`, `Study F`, `Study G`) %>%
+    pander(caption='Symptoms and signs (number recorded) by study and type')
+```
+
+```{r Symptom by study percent, results = 'asis'}
+Total %>% select(Sample_Origin,Symptoms,Percent) %>%
+    spread(Sample_Origin,Percent,drop=FALSE,fill='') %>%
+    select(Symptoms, `Study A`, `Study B`, `Study D`,
+           `Study E`, `Study F`, `Study G`) %>%
+    pander(caption='Symptoms and signs (percentage) by study and type')
+
+rm(Total, Present, Absent)
+```
+
+There are substantial differences in the symptoms recorded - only a minority of studies recorded symptoms at all.
+
+
+# Key question 1
+
+Allowing for the structure of the studies, is there any evidence of association between the viruses?
+ A preliminary test of this is a series of chi-squared tests (Not shown).
+
+```{r Viral links}
+
+pander(chisq.test(Pig$PCV2_Count,Pig$PPV2_Count)) # Yes
+pander(chisq.test(Pig$PCV2_Count,Pig$PPV3_Count)) # Not really
+pander(chisq.test(Pig$PCV2_Count,Pig$PPV4_Count)) # Yes
+pander(chisq.test(Pig$PCV2_Count,Pig$PPV_Count)) # No
+pander(chisq.test(Pig$PCV2_Count,Pig$NI_BOCA_Count)) # Not really
+pander(chisq.test(Pig$PCV2_Count,Pig$SW_BOCA_Count)) # No
+
+pander(chisq.test(Pig$PPV2_Count,Pig$PPV3_Count)) # Yes
+pander(chisq.test(Pig$PPV2_Count,Pig$PPV4_Count)) # Not really
+pander(chisq.test(Pig$PPV2_Count,Pig$PPV_Count)) # No
+pander(chisq.test(Pig$PPV2_Count,Pig$NI_BOCA_Count)) # No
+pander(chisq.test(Pig$PPV2_Count,Pig$SW_BOCA_Count)) # No
+
+pander(chisq.test(Pig$PPV3_Count,Pig$PPV4_Count)) # Yes, just
+pander(chisq.test(Pig$PPV3_Count,Pig$PPV_Count)) # No
+pander(chisq.test(Pig$PPV3_Count,Pig$NI_BOCA_Count)) # No
+pander(chisq.test(Pig$PPV3_Count,Pig$SW_BOCA_Count)) # No
+
+pander(chisq.test(Pig$PPV4_Count,Pig$PPV_Count)) # No
+pander(chisq.test(Pig$PPV4_Count,Pig$NI_BOCA_Count)) # No
+pander(chisq.test(Pig$PPV4_Count,Pig$SW_BOCA_Count)) # No
+
+pander(chisq.test(Pig$PPV_Count,Pig$PPV4_Count)) # No
+pander(chisq.test(Pig$PPV_Count,Pig$NI_BOCA_Count)) # No
+pander(chisq.test(Pig$PPV_Count,Pig$SW_BOCA_Count)) # No
+
+
+pander(chisq.test(Pig$NI_BOCA_Count,Pig$SW_BOCA_Count)) # No
+
+```
+
+There is evidence from these for viral associations involving PCV2 and PPV2, PCV2 and PPV4, PPV2 and PPV3, and possibly PPV3 and PPV4. A more comprehensive answer to the question comes from a regression model. We choose to fit a series of logistic regression models where the outcome is exposure to each virus, and the potential explanatory variables are the study, the sample, and the other viruses. For some viruses, which were only studied in one study, so this variable is omitted. In addition, for the NI_BOCA virus, the models produced meaningless results for the sample type variable.
+
+```{r Functions for glm}
+ORS <- function(fit,Variable) {
+    d <- tidy(fit)
+    c <- tidy(confint(fit))
+    names(c) <- c('term','LowerCI','UpperCI')
+    e <- inner_join(d,c) %>%
+        filter(term == Variable) %>%
+        select(term,estimate,LowerCI,UpperCI) %>%
+        mutate_if(is.numeric,exp)
+ 
+    return(e)
+}# Calculate Odds Ratio and CI's
+
+# Don't remove three tiny groups - make no odds
+#d <- Pig #%>% filter(Sample_Basic != 'Small Intestine') %>% filter(Sample_Basic != 'Colon') %>% filter(Sample_Origin != 'Exp studies')
+#d2 <- Pig %>% filter(Sample_Basic != 'Small Intestine') %>% filter(Sample_Basic != 'Colon') %>% filter(Sample_Origin != 'Exp studies')
+
+```
+
+##PCV2
+
+```{r PCV2}
+M0 <- glm(PCV2_Count~Sample_Origin,family='binomial',data=Pig)
+M1 <- glm(PCV2_Count~Sample_Origin+Sample_Basic,family='binomial',data=Pig)
+##anova(M0,M1)
+
+M2 <- glm(PCV2_Count~Sample_Origin+Sample_Basic+PPV2_Count,family='binomial',data=Pig)
+##anova(M1,M2)
+OR <- ORS(M2,attr(M2$terms,'term.labels')[3])
+
+M3 <- glm(PCV2_Count~Sample_Origin+Sample_Basic+PPV3_Count,family='binomial',data=Pig)
+##anova(M1,M3)
+OR <- rbind(OR, ORS(M3,attr(M3$terms,'term.labels')[3]))
+
+M4 <- glm(PCV2_Count~Sample_Origin+Sample_Basic+PPV4_Count,family='binomial',data=Pig)
+#anova(M1,M4)
+OR <- rbind(OR, ORS(M4,attr(M4$terms,'term.labels')[3]))
+
+M5 <- glm(PCV2_Count~Sample_Basic+NI_BOCA_Count,family='binomial',data=Pig)
+OR <- rbind(OR, ORS(M5,attr(M5$terms,'term.labels')[2]))
+
+M6 <- glm(PCV2_Count~Sample_Basic+SW_BOCA_Count,family='binomial',data=Pig)
+OR <- rbind(OR, ORS(M6,attr(M6$terms,'term.labels')[2]))
+
+OR <- OR %>% mutate(Dependent = 'PCV2_Count')
+OR.PCV2 <- OR
+```
+
+```{r, results = 'asis'}
+pander(OR, caption = 'Odds ratios for detection of PCV2 in samples (Adjusted for study and sample type)')
+```
+
+
+##PPV2
+
+```{r PPV2}
+M0 <- glm(PPV2_Count~Sample_Origin,family='binomial',data=Pig)
+M1 <- glm(PPV2_Count~Sample_Origin+Sample_Basic,family='binomial',data=Pig)
+#anova(M0,M1)
+
+M2 <- glm(PPV2_Count~Sample_Origin+Sample_Basic+PCV2_Count,family='binomial',data=Pig)
+#anova(M1,M2)
+OR <- ORS(M2,attr(M2$terms,'term.labels')[3])
+
+M3 <- glm(PPV2_Count~Sample_Origin+Sample_Basic+PPV3_Count,family='binomial',data=Pig)
+#anova(M1,M3)
+OR <- rbind(OR, ORS(M3,attr(M3$terms,'term.labels')[3]))
+
+M4 <- glm(PPV2_Count~Sample_Origin+Sample_Basic+PPV4_Count,family='binomial',data=Pig)
+#anova(M1,M4)
+OR <- rbind(OR, ORS(M4,attr(M4$terms,'term.labels')[3]))
+
+M5 <- glm(PPV2_Count~Sample_Basic+NI_BOCA_Count,family='binomial',data=Pig)
+OR <- rbind(OR, ORS(M5,attr(M5$terms,'term.labels')[2]))
+
+M6 <- glm(PPV2_Count~Sample_Basic+SW_BOCA_Count,family='binomial',data=Pig)
+OR <- rbind(OR, ORS(M6,attr(M6$terms,'term.labels')[2]))
+
+OR <- OR %>% mutate(Dependent = 'PPV2_Count')
+OR.PPV2 <- OR
+```
+
+```{r, results='asis'}
+pander(OR, caption = 'Odds ratios for detection of PPV2 in samples (Adjusted for study and sample type)')
+```
+
+##PPV3
+
+```{r PPV3}
+M0 <- glm(PPV3_Count~Sample_Origin,family='binomial',data=Pig)
+M1 <- glm(PPV3_Count~Sample_Origin+Sample_Basic,family='binomial',data=Pig)
+#anova(M0,M1)
+
+M2 <- glm(PPV3_Count~Sample_Origin+Sample_Basic+PCV2_Count,family='binomial',data=Pig)
+#anova(M1,M2)
+OR <- ORS(M2,attr(M2$terms,'term.labels')[3])
+
+M3 <- glm(PPV3_Count~Sample_Origin+Sample_Basic+PPV2_Count,family='binomial',data=Pig)
+#anova(M1,M3)
+OR <- rbind(OR, ORS(M3,attr(M3$terms,'term.labels')[3]))
+
+M4 <- glm(PPV3_Count~Sample_Origin+Sample_Basic+PPV4_Count,family='binomial',data=Pig)
+#anova(M1,M4)
+OR <- rbind(OR, ORS(M4,attr(M4$terms,'term.labels')[3]))
+
+
+
+#Not estimateable
+#M5 <- glm(PPV3_Count~NI_BOCA_Count,family='binomial',data=Pig2)
+#OR <- rbind(OR, ORS(M5,attr(M5$terms,'term.labels')[2]))
+
+#M6 <- glm(PPV3_Count~SW_BOCA_Count,family='binomial',data=Pig)
+#OR <- rbind(OR, ORS(M6,attr(M6$terms,'term.labels')[2]))
+
+OR <- OR %>% mutate(Dependent = 'PPV3_Count')
+OR.PPV3 <- OR
+```
+
+```{r, results='asis'}
+pander(OR, caption = 'Odds ratios for detection of PPV3 in samples (Adjusted for study and sample type)')
+```
+
+
+##PPV4
+
+```{r PPV4}
+M0 <- glm(PPV4_Count~Sample_Origin,family='binomial',data=Pig)
+M1 <- glm(PPV4_Count~Sample_Origin+Sample_Basic,family='binomial',data=Pig)
+#anova(M0,M1)
+
+M2 <- glm(PPV4_Count~Sample_Origin+Sample_Basic+PCV2_Count,family='binomial',data=Pig)
+#anova(M1,M2)
+OR <- ORS(M2,attr(M2$terms,'term.labels')[3])
+
+M3 <- glm(PPV4_Count~Sample_Origin+Sample_Basic+PPV2_Count,family='binomial',data=Pig)
+#anova(M1,M3)
+OR <- rbind(OR, ORS(M3,attr(M3$terms,'term.labels')[3]))
+
+M4 <- glm(PPV4_Count~Sample_Origin+Sample_Basic+PPV3_Count,family='binomial',data=Pig)
+#anova(M1,M4)
+OR <- rbind(OR, ORS(M4,attr(M4$terms,'term.labels')[3]))
+
+
+#Not estimateable
+M5 <- glm(PPV4_Count~NI_BOCA_Count,family='binomial',data=Pig)
+OR <- rbind(OR, ORS(M5,attr(M5$terms,'term.labels')[1]))
+
+M6 <- glm(PPV4_Count~SW_BOCA_Count,family='binomial',data=Pig)
+OR <- rbind(OR, ORS(M6,attr(M6$terms,'term.labels')[2]))
+
+OR <- OR %>% mutate(Dependent = 'PPV4_Count')
+OR.PPV4 <- OR
+```
+
+```{r,results='asis'}
+pander(OR, caption = 'Odds ratios for detection of PPV4 in samples (Adjusted for study and sample type, except for NI_BOCA and SW_BOCA)')
+```
+
+
+##NI_BOCA
+
+```{r NI_BOCA}
+
+M2 <- glm(NI_BOCA_Count~PCV2_Count,family='binomial',data=Pig)
+    OR <- ORS(M2,attr(M2$terms,'term.labels')[1])
+
+M3 <- glm(NI_BOCA_Count~PPV2_Count,family='binomial',data=Pig)
+    OR <- rbind(OR, ORS(M3,attr(M3$terms,'term.labels')[1]))
+
+M4 <- glm(NI_BOCA_Count~PPV4_Count,family='binomial',data=Pig)
+    OR <- rbind(OR, ORS(M4,attr(M4$terms,'term.labels')[1]))
+
+#Not estimable
+#M5 <- glm(NI_BOCA_Count~PPV3_Count,family='binomial',data=Pig2)
+#    OR <- rbind(OR, ORS(M5,attr(M5$terms,'term.labels')[1]))
+
+M6 <- glm(NI_BOCA_Count~SW_BOCA_Count,family='binomial',data=Pig)
+    OR <- rbind(OR, ORS(M6,attr(M6$terms,'term.labels')[1]))
+
+OR <- OR %>% mutate(Dependent = 'NI_BOCA_Count')
+OR.NI_BOCA <- OR
+```
+
+```{r, results = 'asis'}
+pander(OR, caption = 'Odds ratios for detection of NI_BOCA in samples (Crude odds ratio)')
+```
+
+
+##SW_BOCA
+
+```{r SW_BOCA}
+
+M2 <- glm(SW_BOCA_Count~ Sample_Basic + PCV2_Count,family='binomial',data=Pig)
+    OR <- ORS(M2,attr(M2$terms,'term.labels')[2])
+
+M3 <- glm(SW_BOCA_Count~ Sample_Basic + PPV2_Count,family='binomial',data=Pig)
+    OR <- rbind(OR, ORS(M3,attr(M3$terms,'term.labels')[2]))
+
+M4 <- glm(SW_BOCA_Count~ Sample_Basic + PPV4_Count,family='binomial',data=Pig)
+    OR <- rbind(OR, ORS(M4,attr(M4$terms,'term.labels')[2]))
+
+#Not estimable
+#M5 <- glm(SW_BOCA_Count~ PPV3_Count,family='binomial',data=Pig)
+#    OR <- rbind(OR, ORS(M5,attr(M5$terms,'term.labels')[1]))
+
+M6 <- glm(SW_BOCA_Count~ NI_BOCA_Count,family='binomial',data=Pig)
+#    OR <- rbind(OR, ORS(M6,attr(M6$terms,'term.labels')[1]))
+
+OR <- OR %>% mutate(Dependent = 'SW_BOCA_Count')
+OR.SW_BOCA <- OR
+```
+
+```{r, results = 'asis'}
+pander(OR, caption = 'Odds ratios for detection of SW_BOCA in samples (Adjusted for sample type, except for NI_BOCA)')
+```
+
+##Graph of Odds ratios
+
+```{r}
+
+# OR <- rbind(OR.PCV2,OR.PPV2,OR.PPV2,OR.PPV3,OR.PPV4,OR.NI_BOCA,OR.SW_BOCA)
+OR <- rbind(OR.PCV2,OR.PPV2,OR.PPV2,OR.PPV3,OR.PPV4) %>%
+    filter(term != 'NI_BOCA_Count') %>%
+    filter(term != 'SW_BOCA_Count') %>%
+    mutate(term = str_remove(term,'_Count')) %>%
+    mutate(Dependent = str_remove(Dependent,'_Count'))
+    
+
+#OR <- OR %>% mutate(xmax = pmin(5,UpperCI)) # This is purely for presentation
+
+g <- ggplot(data=OR,aes(x=estimate,y=term,colour=Dependent)) +
+    geom_point(size=4) +
+    geom_errorbarh(aes(xmin = LowerCI, xmax = UpperCI, 
+                       alpha = 0.5), size = 2) +
+    geom_vline(xintercept = 1,colour='darkgray') +
+    #xlim(c(0,5)) +
+    xlab('Odds ratio') + ylab('Virus') +
+    scale_colour_brewer(palette="Dark2") +
+    theme_bw(base_size = 20) +
+    facet_wrap(~Dependent,scales='free') +   guides(color=FALSE,alpha=FALSE)
+print(g)
+
+
+ggsave(g,filename = 'Images/OddsRatio.png',width=40,height=20,unit=c('cm'), dpi=600)
+
+rm(OR,M0,M1,M2,M3,M4,M5,M6)
+rm(OR.PCV2,OR.PPV2,OR.PPV3,OR.PPV4,OR.NI_BOCA,OR.SW_BOCA)
+```
+
+In this graph, we show, for each virus, the estimates, and the associated 95% confidence intervals, of the increased risk of that virus being detected, given that another virus was detected. These estimates are Odds ratios. For clarity of presentation, values over 5 have been trimmed to 5. The dark grey vertical line on each graph is at an Odds ratio of one - which implies no effect.
+
+```{r}
+#summary(glmer(PCV2_Count ~ PPV2_Count + Sample_Basic + (1|Sample_Origin), family='binomial',data=Pig))
+```
+
+
+# Key question 2
+
+Allowing for the structure of the studies, is there any evidence of association between the viruses and any given symptom?
+
+In the first place for many symptoms, only a few cases have been reported.
+
+```{r}
+Sums <- Pig %>% select(Sample_Origin,Symptoms) %>%
+    group_by(Sample_Origin) %>%
+    summarise_if(is.numeric,funs(sum(.,na.rm=TRUE)))
+
+Sums.Total <- Sums %>% 
+    summarise_if(is.numeric,funs(sum(.,na.rm=TRUE)))
+
+ORDERING <- names(Sums.Total)[order(t(Sums.Total),decreasing = TRUE)]  #Symptoms in order of frequency
+
+Sums.Total <- Sums.Total %>%
+    mutate(Sample_Origin = 'Total') %>%
+    select(Sample_Origin,ORDERING)
+
+Sums <- rbind(Sums.Total,Sums)
+
+
+Totals <- data.frame(t(Sums.Total[-1])) %>%
+    rownames_to_column('Symptom') %>%
+    mutate(Symptom = factor(Symptom,levels=ORDERING))
+
+    names(Totals) <- c('Symptom','Count')
+
+Totals <- Totals %>%
+    arrange(desc(Count))
+
+
+g <- ggplot(data=Totals,aes(x=Symptom,y=Count)) + geom_col(fill='lightblue',colour='grey') + 
+#    scale_colour_brewer(palette="Dark2") +
+    theme_bw(base_size = 20) +
+    theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5)) +
+    ggtitle('Count of reported symptoms, signs, and findings') +   guides(fill=FALSE)
+
+g
+print(g)
+
+ggsave(g,filename = 'Images/Count of Symptoms.png',width=20,height=20,units=c('cm'), dpi=600)
+
+```
+
+Also, for many studies, few or no symptoms were recorded.
+
+```{r}
+Sums <- Pig %>% select(Sample_Origin,Symptoms) %>%
+    group_by(Sample_Origin) %>%
+    summarise_if(is.numeric,funs(sum(.,na.rm=TRUE)))
+
+Sums.Total <- Sums %>% 
+    select_if(is.numeric) %>%
+    rowSums()
+
+Sums.Total <- data.frame(cbind(Sums$Sample_Origin,Sums.Total))
+names(Sums.Total) <- c('Study','Total')
+Sums.g <- Sums %>% gather(Symptom,Count,-Sample_Origin)
+
+
+pander(Sums.Total, caption='Number of signs, symptoms and findings reported in each study')
+
+
+g <- ggplot(data=(Sums.g %>%
+                    filter(Sample_Origin %in% 
+                    c('Study B', 'Study D', 'Study E','Study F'))),
+            aes(x=Symptom,y=Count)) + geom_col(fill='lightblue',colour='grey') + 
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5)) +
+    ggtitle('Count of reported symptoms, signs, and findings') +   #guides(fill=FALSE) +
+    facet_wrap(~Sample_Origin,scales = 'free_y')
+print(g)
+
+ggsave(g,filename = 'Images/Count of Symptoms by Study.png',width=20,height=20,units=c('cm'), dpi=600)
+
+rm(Sums,Sums.Total,Sums.g)
+```
+
+# Latent Class Analysis
+
+We use LCA to explore the patterns of association found between the symptoms and signs. The underlying assumption is that there are number of unobserved, or latent, classes in the data, and given membership of these classes, the measured, or manifest, variables (such as Gut Symptoms, Wasting, Lung Oedema and so on), are statistically independent.
+
+```{r, prepare LCA dataset}
+AddOne <- function(x) { # poLCA needs 1,2 variables, not 0,1
+    return(x+1)
+} # Manifest variables for poLCA need to run up from 1, not zero.
+
+LCA.data <- Pig %>%
+    dplyr::select(Symptoms) %>%
+    mutate_all(funs(AddOne))
+
+LCA.data <- LCA.data %>%
+    cbind(Pig %>% dplyr::select(Sample_Origin,Sample_Basic,Viruses_Count,Ages,Total,count_na)) %>%
+    filter(count_na <25) # Remove those with no symptoms signs or findings recorded, positively or negatively
+```
+
+Animals on which no clinical, or pathological data were recorded are excluded. However animals on which data were recorded, are included even if what was recorded was the absence of a symptom, sign or finding.
+
+```{r}
+##Prepare the functions for the LCA
+LCA.50 <- Totals %>% filter(Count>=50) %>% select(Symptom) # 6
+f.LCA.50 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema) ~1 #Down to 50 occurrences
+
+Totals %>% filter(Count>=30) %>% select(Symptom) # 10
+f.LCA.30 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney) ~1 # Down to 30
+
+Totals %>% filter(Count>=20) %>% select(Symptom) #  14
+f.LCA.20 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema) ~1 # Down to 20
+
+Totals %>% filter(Count>=10) %>% select(Symptom) # 22
+f.LCA.10 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~1 # Down to 10
+
+
+Totals %>% select(Symptom) # 25
+f.LCA.All <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly,
+                  Eye, PRRS_Ab., Aborted) ~1 # All, down to 4
+
+
+```
+
+In LCA, there are a number of analytic decisions which need to be made. These include the number of symptoms to analyse, as there is considerable variation between common symptoms, like Gut symptoms recorded on 155 occasions, and rare symptoms, like IFA_PRRS recorded only four times.
+
+To address this a set of models with varying number of symptoms are prepared and analysed, to see if the rarer symptoms contribute much to the pattern of class membership. Another critical question is how many groups should be sought. This number must be specified for each analysis. Typically, a range of numbers of classes is considered, and the model fit, and domain knowledge are used to identify the optimum classification.
+
+```{r, how many groups?}
+
+Report.poLCA <- function(fit) {
+    Attempts <- ifelse(length(fit$attempts) == 0,1,length(fit$attempts))
+    c(length(fit$P),fit$aic,fit$bic,Attempts)
+}
+
+FIT <- function(formula, data, nclass=1,nrep=400,na.rm=FALSE) {
+    fit <- poLCA(formula = formula, data = data,
+                 nclass = nclass, nrep=nrep, na.rm=na.rm)
+    fit
+    return(Report.poLCA(fit))
+}
+
+One   <- FIT(formula = f.LCA.50, data = LCA.data, nclass = 1, nrep=200, na.rm=FALSE)
+Two   <- FIT(formula = f.LCA.50, data = LCA.data, nclass = 2, nrep=200, na.rm=FALSE)
+Three <- FIT(formula = f.LCA.50, data = LCA.data, nclass = 3, nrep=200, na.rm=FALSE)#  Optimum for down to 50 CHOOSE 3
+Four  <- FIT(formula = f.LCA.50, data = LCA.data, nclass = 4, nrep=200, na.rm=FALSE)
+Five  <- FIT(formula = f.LCA.50, data = LCA.data, nclass = 5, nrep=200, na.rm=FALSE)
+Six   <- FIT(formula = f.LCA.50, data = LCA.data, nclass = 6, nrep=200, na.rm=FALSE)
+
+FIT.50 <- as.data.frame(rbind(One,Two,Three,Four,Five,Six))
+names(FIT.50) <- c('nClasses','AIC','BIC','Attempts')
+
+One   <- FIT(formula = f.LCA.30, data = LCA.data, nclass = 1, nrep=200, na.rm=FALSE)
+Two   <- FIT(formula = f.LCA.30, data = LCA.data, nclass = 2, nrep=200, na.rm=FALSE)
+Three <- FIT(formula = f.LCA.30, data = LCA.data, nclass = 3, nrep=200, na.rm=FALSE)#  Optimum for down to 10 CHOOSE 3
+Four  <- FIT(formula = f.LCA.30, data = LCA.data, nclass = 4, nrep=200, na.rm=FALSE)
+Five  <- FIT(formula = f.LCA.30, data = LCA.data, nclass = 5, nrep=200, na.rm=FALSE)
+Six   <- FIT(formula = f.LCA.30, data = LCA.data, nclass = 6, nrep=200, na.rm=FALSE)
+
+FIT.30 <- as.data.frame(rbind(One,Two,Three,Four,Five,Six))
+names(FIT.30) <- c('nClasses','AIC','BIC','Attempts')
+
+One   <- FIT(formula = f.LCA.20, data = LCA.data, nclass = 1, nrep=200, na.rm=FALSE)
+Two   <- FIT(formula = f.LCA.20, data = LCA.data, nclass = 2, nrep=200, na.rm=FALSE)
+Three <- FIT(formula = f.LCA.20, data = LCA.data, nclass = 3, nrep=200, na.rm=FALSE)#  Optimum for down to 10 CHOOSE 3
+Four  <- FIT(formula = f.LCA.20, data = LCA.data, nclass = 4, nrep=200, na.rm=FALSE)
+Five  <- FIT(formula = f.LCA.20, data = LCA.data, nclass = 5, nrep=200, na.rm=FALSE)
+Six   <- FIT(formula = f.LCA.20, data = LCA.data, nclass = 6, nrep=200, na.rm=FALSE)
+
+FIT.20 <- as.data.frame(rbind(One,Two,Three,Four,Five,Six))
+names(FIT.20) <- c('nClasses','AIC','BIC','Attempts')
+
+One   <- FIT(formula = f.LCA.10, data = LCA.data, nclass = 1, nrep=200, na.rm=FALSE)
+Two   <- FIT(formula = f.LCA.10, data = LCA.data, nclass = 2, nrep=200, na.rm=FALSE)
+Three <- FIT(formula = f.LCA.10, data = LCA.data, nclass = 3, nrep=200, na.rm=FALSE)#  Optimum for down to 10 CHOOSE 3
+Four  <- FIT(formula = f.LCA.10, data = LCA.data, nclass = 4, nrep=200, na.rm=FALSE)
+Five  <- FIT(formula = f.LCA.10, data = LCA.data, nclass = 5, nrep=200, na.rm=FALSE)
+Six   <- FIT(formula = f.LCA.10, data = LCA.data, nclass = 6, nrep=200, na.rm=FALSE)
+
+FIT.10 <- as.data.frame(rbind(One,Two,Three,Four,Five,Six))
+names(FIT.10) <- c('nClasses','AIC','BIC','Attempts')
+
+One   <- FIT(formula = f.LCA.All, data = LCA.data, nclass = 1, nrep=200, na.rm=FALSE)
+Two   <- FIT(formula = f.LCA.All, data = LCA.data, nclass = 2, nrep=200, na.rm=FALSE)
+Three <- FIT(formula = f.LCA.All, data = LCA.data, nclass = 3, nrep=200, na.rm=FALSE)#  Optimum for down to All CHOOSE 3
+Four  <- FIT(formula = f.LCA.All, data = LCA.data, nclass = 4, nrep=200, na.rm=FALSE)
+Five  <- FIT(formula = f.LCA.All, data = LCA.data, nclass = 5, nrep=200, na.rm=FALSE)
+Six   <- FIT(formula = f.LCA.All, data = LCA.data, nclass = 6, nrep=200, na.rm=FALSE)
+
+FIT.All <- as.data.frame(rbind(One,Two,Three,Four,Five,Six))
+names(FIT.All) <- c('nClasses','AIC','BIC','Attempts')
+```
+
+## Tables of AIC and BIC by the number of classes for the models tested
+
+```{r}
+row.names(FIT.50) <- NULL
+row.names(FIT.30) <- NULL
+row.names(FIT.20) <- NULL
+row.names(FIT.10) <- NULL
+row.names(FIT.All) <- NULL
+
+
+pander(FIT.50,Caption='Table of AIC and BIC for models fitted to symptoms recorded 50 times or more.') # 3
+pander(FIT.30,Caption='Table of AIC and BIC for models fitted to symptoms recorded 30 times or more.') # 3 or 4
+pander(FIT.20,Caption='Table of AIC and BIC for models fitted to symptoms recorded 20 times or more.') # 4
+pander(FIT.10,Caption='Table of AIC and BIC for models fitted to symptoms recorded 10 times or more.') # 3
+pander(FIT.All,Caption='Table of AIC and BIC for models fitted to all symptoms recorded.') # 3
+
+```
+
+The BIC values suggest that models with three, or sometimes four, latent classes are the best fit for each of these models. The AIC values are less clear-cut, and suggest larger numbers of classes would fit better. Given the numbers of animals in these studies, the large number of parameters estimated, and our understanding of these criteria, we will be guided by the BIC (See Dziak JJ, Coffman DL, Lanza ST, Li R. Sensitivity and Specificity of Information Criteria [Internet]. Pennsylvania State University; 2012 Jun [cited 2018 Aug 16]. (Technical Report Series). Report No.: 12–119. Available from: https://methodology.psu.edu/AIC-vs-BIC for a more detailed discussion).
+
+
+```{r,functions for poLCA}
+# Graph of poLCA object
+poLCA.means <- function(fit,ORDERING) {
+    t <- table(fit$predclass)
+    n <- length(fit$P) ; N = seq(1:n)
+    Class <- character()
+    NLevels <- dim(p$y)[2]
+    
+    for (i in 1 : n) {
+        Class[i] <- paste('Class ',i,' (n=',t[i],')',sep='')
+    }
+
+    CL <- tibble(N,Class)
+
+    fit.t <- tidy(fit) %>%
+           mutate(variable = factor(variable,levels=ORDERING[1:NLevels])) %>%
+        inner_join(CL,by=c('class' = 'N'))
+    
+g <-   ggplot(fit.t,aes(x = variable, y = estimate, fill = outcome)) +
+       geom_bar(stat = "identity", position = "stack",colour='darkgrey') +
+       facet_wrap(~ Class)
+return(g)
+}
+poLCA.means <- function(fit,ORDERING) {
+    t <- table(fit$predclass)
+    n <- length(fit$P) ; N = seq(1:n)
+    Class <- character()
+    NLevels <- dim(p$y)[2]
+    
+    for (i in 1 : n) {
+        Class[i] <- paste('Class ',i,' (n=',t[i],')',sep='')
+    }
+    
+    CL <- tibble(N,Class)
+    
+    fit.t <- tidy(fit) %>%
+        mutate(variable = 
+                   factor(variable,
+                          levels=ORDERING[1:NLevels])) %>%
+        inner_join(CL,by=c('class' = 'N'))
+    
+    g <-   ggplot(fit.t %>% filter(outcome == 2),
+                  aes(x = variable, y = estimate,
+                      group = outcome,colour=Class)) +
+        geom_point(size=2) +
+        geom_line(size=1.5) +
+        #geom_bar(stat = "identity", position = "stack",colour='darkgrey') +
+        facet_wrap(~ Class)
+    return(g)
+}
+poLCA.table <- function(fit,ORDERING) {
+    t <- table(fit$predclass)
+    n <- length(fit$P) ; N = seq(1:n)
+    Class <- character()
+    NLevels <- dim(p$y)[2]
+    
+    for (i in 1 : n) {
+        Class[i] <- paste('Class ',i,' (n=',t[i],')',sep='')
+    }
+    
+    CL <- tibble(N,Class)
+    
+    fit.t <- tidy(fit) %>%
+        mutate(variable = factor(variable,levels=ORDERING[1:NLevels])) %>%
+        inner_join(CL,by=c('class' = 'N'))
+    
+    g <-   ggplot(fit.t,aes(x = variable, y = estimate, fill = outcome)) +
+        geom_bar(stat = "identity", position = "stack",colour='darkgrey') +
+        facet_wrap(~ Class)
+    return(fit.t)
+}
+ReturnCoeffLCA <- function(x) {
+R <- length(x$P)
+length <- length(x$coeff)
+
+dimensions <- dim(x$coeff)
+    height <- dimensions[1]
+    width <- dimensions[2]
+
+names <- dimnames(x$coeff)[[1]]
+    names <- rep(names,width)
+    
+form <- as.character(x$call$formula)
+    form <- rep(form, length)
+    
+Coeff <- as.vector(x$coeff) # L elements
+Coeff.se <- as.vector(x$coeff.se) # L elements
+
+tval <- Coeff/Coeff.se
+pval <- 1 - 3*abs(pt(tval,x$resid.df)-0.5)
+
+comp = vector()
+
+for (w in 1:width) {
+for (h in 1:height) {
+    comp <- c(comp, paste0(w+1,'/1'))
+    #cat(comp)
+        }
+    }
+#comp
+disp <- tibble(form,names,comp,Coeff,Coeff.se,tval,pval)
+names(disp) <- c('Formula', 'Variables', 'Groups', 'Coeff', 'SE', 't', 'p-value')
+
+
+return(disp)
+}
+
+#g <- poLCA.means(d,ORDERING) 
+#g <- g + theme_bw(base_size=12) +
+#       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+#       ggtitle('Class membership probabilities - Base model') + xlab('Symptom, sign, or finding') +
+#       #guides(fill=FALSE) +
+#       scale_fill_gradientn(colours=terrain.colors(2))
+
+
+#Convert logOdds to probability
+Prob <- function(logOdds) {
+    return((exp(logOdds))/(1+ exp(logOdds)))
+}
+
+poLCA.coeff.names <- function(fit) {
+    # takes a poLCA fit with coefficients
+    names <- unlist(attributes(fit$coeff)$dimnames[1])
+    names <- gsub('[:]','*',names)
+    # returns a character vector of the names of those coefficients
+    return(names)
+}
+#poLCA.coeff.names(poLCA.PCV2.PPV2)
+
+# Crude CI's for poLCA
+poLCA.CI <- function(fit,Z=1.96) {
+    coef <- data.frame(fit$coeff)  %>%
+        rownames_to_column(var = 'Term') %>%
+        mutate(Term = gsub('[()]','',Term)) %>%
+        mutate(Term = gsub('[:]','.',Term)) 
+
+    # The rest of the columns are called X1, X2 and so on.
+    # We want to change these to Class_2:1 Class_3:1 etc.
+    NN <- names(coef)[-1] # X1, X2, X3, ...
+    NN <- gsub('X','',NN) # '1', '2', '3'', ...
+    NN <- as.numeric(NN) + 1 # 2, 3, 4, ...
+    NN <- paste('Class_',NN,':1',sep='') # Class_2:1, Class_3:1
+    names(coef) <- c('Term',NN)
+
+    coef <- coef %>%
+        gather(Class,Value,-Term)
+    coef
+
+    se   <- data.frame(fit$coeff.se)  %>%
+        rownames_to_column(var = 'Term') %>%
+        mutate(Term = gsub('[()]','',Term)) %>%
+        mutate(Term = gsub('[:]','.',Term)) 
+    names(se) <- c('Term',NN)
+    se <- se %>%
+        gather(Class,Value,-Term)
+    se
+    
+    coef <- coef %>%
+        inner_join(se, by=c('Term','Class'),
+                   suffix=c('.coef','.se'))
+
+
+    coef <- coef %>%
+        mutate(LowerCI = Value.coef-Z*Value.se) %>%
+        mutate(UpperCI = Value.coef+Z*Value.se) %>%
+        mutate(OR = exp(Value.coef)) %>%
+        mutate(OR.Lr = exp(LowerCI)) %>%
+        mutate(OR.Upr = exp(UpperCI)) %>%
+        select(-LowerCI,-UpperCI)
+
+return(coef)
+}
+#d <- poLCA.CI(poLCA.PCV2.PPV2)
+
+#kable(d)
+
+```
+
+## Graphs of the various choices for Symptom numbers to include and the number of latent classes (groups) to use.
+
+### Symptoms occurring 50 times or more and 3 latent classes
+
+```{r, poLCA.50}
+poLCA.50 <- poLCA(formula = f.LCA.50, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE) # Six symptoms recorded 50 or more times
+p <- poLCA.50
+
+ g <- poLCA.means(p,ORDERING)
+ g <- g + theme_bw(base_size=12) +
+     theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+     theme(text = element_text(size=16)) +
+     ggtitle('Class membership probabilities',subtitle='Symptoms occurring 50 times or more')+ 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+ print(g)
+
+ggsave(g,filename = 'Images/LCA 50 Model.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+```
+
+### Symptoms occurring 30 times or more and 3 latent classes
+
+```{r, poLCA.30.3}
+poLCA.30.3 <- poLCA(formula = f.LCA.30, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE) # Ten symptoms recorded 30 or more times
+p <- poLCA.30.3
+
+ g <- poLCA.means(p,ORDERING)
+ g <- g + theme_bw(base_size=12) +
+     theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+     theme(text = element_text(size=16)) +
+     ggtitle('Class membership probabilities',subtitle='Symptoms occurring 30 times or more')+ 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+ print(g)
+
+ggsave(g,filename = 'Images/LCA 30.3 Model.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+```
+
+### Symptoms occurring 30 times or more and 4 latent classes
+
+```{r, poLCA.30.4}
+poLCA.30.4 <- poLCA(formula = f.LCA.30, data = LCA.data, nclass = 4, nrep=400, na.rm = FALSE) # Ten symptoms recorded 30 or more times
+p <- poLCA.30.4
+
+ g <- poLCA.means(p,ORDERING)
+ g <- g + theme_bw(base_size=12) +
+     theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+     theme(text = element_text(size=16)) +
+     ggtitle('Class membership probabilities',subtitle='Symptoms occurring 30 times or more')+ 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+ print(g)
+
+ggsave(g,filename = 'Images/LCA 30.4 Model.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+```
+
+### Symptoms occurring 20 times or more and 3 latent classes
+
+```{r, poLCA.20.3}
+poLCA.20.3 <- poLCA(formula = f.LCA.20, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE) # Fourteen symptoms recorded 30 or more times
+p <- poLCA.20.3
+
+ g <- poLCA.means(p,ORDERING)
+ g <- g + theme_bw(base_size=12) +
+     theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+     theme(text = element_text(size=16)) +
+     ggtitle('Class membership probabilities',subtitle='Symptoms occurring 20 times or more')+ 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+ print(g)
+
+ggsave(g,filename = 'Images/LCA 20.3 Model.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+```
+
+### Symptoms occurring 20 times or more and 4 latent classes
+
+```{r, poLCA.20.4}
+poLCA.20.4 <- poLCA(formula = f.LCA.20, data = LCA.data, nclass = 4, nrep=400, na.rm = FALSE) # Fourteen symptoms recorded 20 or more times
+p <- poLCA.20.4
+
+ g <- poLCA.means(p,ORDERING)
+ g <- g + theme_bw(base_size=12) +
+     theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+     theme(text = element_text(size=16)) +
+     ggtitle('Class membership probabilities',subtitle='Symptoms occurring 20 times or more')+ 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+ print(g)
+
+ggsave(g,filename = 'Images/LCA 20.4 Model.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+```
+
+### Symptoms occurring 10 times or more and 3 latent classes
+
+```{r, poLCA.10}
+poLCA.10 <- poLCA(formula = f.LCA.10, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE) # Twenty-two symptoms recorded 10 or more times
+p <- poLCA.10
+
+ g <- poLCA.means(p,ORDERING)
+ g <- g + theme_bw(base_size=12) +
+     theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+     theme(text = element_text(size=16)) +
+     ggtitle('Class membership probabilities',subtitle='Symptoms occurring 10 times or more')+ 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+ 
+ print(g)
+
+ggsave(g,filename = 'Images/LCA 10 Model.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+```
+
+### Latent classes and symptoms
+
+All of this suggests that there three or four groups in the data, both when the commoner symptoms (those recorded more than 10 times) are considered, and when the full range of findings is included. The final choice of latent class needs to be made on substantive grounds. However, looking at the class memberships, the less common symptoms are not discriminatory, and examining the graphs, it looks as if there are three groups, one primarily with gut symptoms, one with wasting and respiratory and gut symptoms, and one with respiratory symptoms and no wasting.
+
+Following discussions with subject matter experts, it was felt that the three class model, with all symptoms and signs occurring ten times or more included, was the best option.
+
+It is then possible to use these regression methods to see how other covariates affect the probability of class membership. Of particular interest are Age and Viral infection. In these latent class regression models, we fit model, to see if the the probability of class membership is predicted by one or more covariates - in this case, age and identified viral infection.
+
+## Base model
+
+```{r, Base model}
+f.LCA.10 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~1 # Down to 10
+
+p <- poLCA(formula = f.LCA.10, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size = 12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities',
+               subtitle ='Base model') + 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+
+print(g)
+
+ggsave(g,filename = 'Images/Base LCA Model.png',
+       width=30,height=15,
+       units=c('cm'), dpi=600)
+
+poLCA.Base <- p
+```
+
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.Base))
+```
+
+## Add Age
+
+```{r, Try age}
+
+f.LCA.10.Age <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ Ages
+
+p <- poLCA(formula = f.LCA.10.Age, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size = 12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ Age') + 
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with Age.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.Age <- p
+```
+
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.Age))
+```
+
+Age, grouped into 4 groups, does add significantly to the model, but the latent classes are very similar. Six ages are missing, which is why the numbers in the classes are a little different.
+
+## Add viruses
+
+### PCV2
+
+```{r, Try PCV2}
+f.LCA.10.PCV2 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count
+
+p <- poLCA(formula = f.LCA.10.PCV2, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2 <- p
+```
+
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2))
+```
+
+PCV2 does contribute significantly to the model. Samples are somewhat less likely to be in Class 2 if PCV2 is positive, and more likely to be in Class 3.
+
+### PPV2
+
+```{r, Try PPV2}
+f.LCA.10.PPV2 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PPV2_Count
+
+p <- poLCA(formula = f.LCA.10.PPV2, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities',subtitle='Covariate ~ PPV2') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PPV2.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PPV2 <- p
+
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PPV2))
+```
+
+PPV2 does not contribute significantly to the model.
+
+### PPV3
+
+```{r, Try PPV3}
+f.LCA.10.PPV3 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PPV3_Count
+
+p <- poLCA(formula = f.LCA.10.PPV3, data = LCA.data, nclass = 3, nrep=400, na.rm = FALSE)
+
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities',subtitle = 'Covariate ~ PPV3') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PPV3.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PPV3 <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PPV3))
+```
+
+PPV3 does not contribute significantly to the model.
+
+### PPV4
+
+```{r, Try PPV4}
+f.LCA.10.PPV4 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PPV4_Count
+
+p <- poLCA(formula = f.LCA.10.PPV4, data = LCA.data, nclass = 3, nrep=400, na.rm=FALSE)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PPV4') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PPV4.png',width=25,height=15, units=c('cm'), dpi=600)
+
+
+poLCA.CI(p)
+poLCA.PPV4 <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PPV4))
+```
+
+There is little evidence that PPV4 contributes to the model, but there are only 24 PPV4 positive cases in the data. 
+
+### PCV2 + PPV2
+
+```{r, Try PCV2 + PPV2}
+f.LCA.10.PCV2.PPV2 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count + PPV2_Count
+
+p <- poLCA(formula = f.LCA.10.PCV2.PPV2, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2 + PPV2') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 + PPV2.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2.PPV2 <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV2))
+```
+
+Adding the two viruses, there is some evidence for an effect.
+
+### PCV2 * PPV2
+
+```{r, PCV2 * PPV2}
+f.LCA.10.PCV2_PPV2 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count * PPV2_Count
+
+p <- poLCA(formula = f.LCA.10.PCV2_PPV2, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = ' Covariate ~ PCV2*PPV2') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 * PPV2.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2_PPV2 <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV2))
+```
+
+Both PCV2 and PPV2 contribute significantly to the model, and there is some evidence of an interaction between them.
+
+### Age + PCV2 + PPV2
+
+```{r}
+f.LCA.10.PCV2.PPV2.Age <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count + PPV2_Count + Ages
+
+p <- poLCA(formula = f.LCA.10.PCV2.PPV2.Age, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities',subtitle = 'Covariate ~ PCV2 + PPV2 + Age') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 + PPV2 + Age.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2.PPV2.Age <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV2.Age))
+```
+
+### Age + PCV2 * PPV2
+
+```{r}
+f.LCA.10.PCV2_PPV2.Age <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count * PPV2_Count + Ages
+
+p <- poLCA(formula = f.LCA.10.PCV2_PPV2.Age, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2*PPV2 + Age') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 * PPV2.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2_PPV2.Age <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV2.Age))
+```
+
+Both PCV2 and PPV2 contribute significantly to the model, and there is some evidence of an interaction between them. Given the two viruses, there is only weak evidence for an effect of Age in the model.
+
+
+### PCV2 + PPV3
+
+```{r}
+f.LCA.10.PCV2.PPV3 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count + PPV3_Count
+
+p <- poLCA(formula = f.LCA.10.PCV2.PPV3, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2 + PPV3') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 + PPV3.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2.PPV3 <- p
+```
+
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV3))
+```
+
+### PCV2 * PPV3
+
+```{r}
+f.LCA.10.PCV2_PPV3 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count * PPV3_Count
+
+
+p <- poLCA(formula = f.LCA.10.PCV2_PPV3, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2*PPV3') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 * PPV3.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2_PPV3 <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV3))
+```
+
+Given PCV2 in the model, adding PPV3 makes little contribution. The interaction model PCV2 * PPV3 fails to converge to meaningful values.
+
+
+### PCV2 + PPV4
+
+```{r}
+f.LCA.10.PCV2.PPV4 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count + PPV4_Count
+
+p <- poLCA(formula = f.LCA.10.PCV2.PPV4, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2 + PPV4') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 + PPV4.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2.PPV4 <- p
+```
+
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV4))
+```
+
+### PCV2 * PPV4
+
+```{r}
+f.LCA.10.PCV2_PPV4 <- cbind(Enteric, Respiratory, Lung_Cons.,
+                  Lymph_Depl., Wasting, Lung_Oedema,
+                  Lymphadenopathy, BI_Pneumonia,
+                  Pericardium, Kidney,
+                  Syncytia, Inclusions,
+                  Peritonitis, Lymphoedema,
+                  Abdo_Fluid, Stomach_Ulcer,
+                  Focal_Necr., Meningitis,
+                  Brain_Oedema, PDNS,
+                  Rash, Organomegaly) ~ PCV2_Count * PPV4_Count
+
+
+p <- poLCA(formula = f.LCA.10.PCV2_PPV4, data = LCA.data, nclass = 3, nrep=400)
+
+g <- poLCA.means(p,ORDERING)
+g <- g + theme_bw(base_size=12) +
+       theme(axis.text.x = element_text(angle = -90, hjust=0,vjust = 0.5, size=9)) +
+       ggtitle('Class membership probabilities', subtitle = 'Covariate ~ PCV2*PPV4') +
+    xlab('Symptom, sign, or finding') +
+    ylab('Probability') + guides(colour=FALSE)
+print(g)
+
+ggsave(g,filename = 'Images/LCA Model with PCV2 * PPV4.png',width=25,height=15, units=c('cm'), dpi=600)
+
+poLCA.CI(p)
+
+poLCA.PCV2_PPV4 <- p
+```
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV4))
+```
+
+Given PCV2 in the model, adding PPV4 leads to a model that fails to converge to meaningful values. This may reflect the small number of PPV4 positive cases in the data.
+
+
+# Summary of LCA models
+
+These are the parameters for the covariates added to the LCA models.
+
+## Age
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.Age))
+```
+
+To interpret these, the estimates presented are the effect of a one unit change in Age (which runs from 0 to 4). The estimates are the log of the odds of being in Class 2, compared to Class 1, or in Class 3 compared to Class 1.
+
+These are more useful when presented as Odds ratios, where the Odds ratio is an estimate of the relative odds of being in (respectively) Class 2 rather than Class 1  or Class 3 rather than Class 1 for a one unit change in Age. An Odds ratio close to 1 suggests little effect. Odds ratios over one say that the pig is more likely to be in the respective Class than in Class 1, and ratios under one say it is less likely to be in the respective Class than in Class 1.
+
+## PCV2
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2))
+```
+
+## PPV2
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PPV2))
+```
+
+## PPV3
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PPV3))
+```
+
+## PPV4
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PPV4))
+```
+
+## PCV2 + PPV2
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV2))
+```
+
+### PCV2 * PPV2
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV2))
+```
+
+### PCV2 + PPV2 + Age
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV2.Age))
+```
+
+### PCV2 * PPV2 + Age
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV2.Age))
+```
+
+## PCV2 and PPV3
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV3))
+```
+
+### PCV2 * PPV3
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV3))
+```
+
+## PCV2 and PPV4
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2.PPV4))
+```
+
+### PCV2 * PPV4
+
+```{r,results = 'asis'}
+pander(poLCA.CI(poLCA.PCV2_PPV4))
+```
+
+
+# Summary tables
+
+```{r SUMMARY}
+Model <- c('poLCA.PCV2', 'poLCA.PPV2',
+           'poLCA.PPV3', 'poLCA.PPV4',
+           'poLCA.PCV2_PPV2','poLCA.PCV2_PPV2.Age',
+'poLCA.PCV2.PPV2', 'poLCA.PCV2.PPV2.Age',
+'poLCA.PCV2_PPV3', 'poLCA.PCV2.PPV3',
+'poLCA.PCV2_PPV4', 'poLCA.PCV2.PPV4')
+
+g.poLCA.PCV2 <- glance(poLCA.PCV2)
+g.poLCA.PPV3 <- glance(poLCA.PPV3)
+g.poLCA.PPV4 <- glance(poLCA.PPV4)
+g.poLCA.PPV2 <- glance(poLCA.PPV2)
+
+g.poLCA.PCV2_PPV2 <- glance(poLCA.PCV2_PPV2)
+g.poLCA.PCV2_PPV2.Age <- glance(poLCA.PCV2_PPV2.Age)
+g.poLCA.PCV2.PPV2 <- glance(poLCA.PCV2.PPV2)
+g.poLCA.PCV2.PPV2.Age <- glance(poLCA.PCV2.PPV2.Age)
+
+g.poLCA.PCV2_PPV3 <- glance(poLCA.PCV2_PPV3)
+g.poLCA.PCV2.PPV3 <- glance(poLCA.PCV2.PPV3)
+
+g.poLCA.PCV2_PPV4 <- glance(poLCA.PCV2_PPV4)
+g.poLCA.PCV2.PPV4 <- glance(poLCA.PCV2.PPV4)
+
+
+SUMMARY <- rbind(
+    g.poLCA.PCV2,g.poLCA.PPV2,
+    g.poLCA.PPV3,g.poLCA.PPV4,
+    g.poLCA.PCV2_PPV2,g.poLCA.PCV2_PPV2.Age,
+    g.poLCA.PCV2.PPV2,g.poLCA.PCV2.PPV2.Age,
+    g.poLCA.PCV2_PPV3,g.poLCA.PCV2.PPV3,
+    g.poLCA.PCV2_PPV4,g.poLCA.PCV2.PPV4) %>%
+    cbind(Model) 
+SUMMARY <- SUMMARY %>% select(Model, AIC, BIC, df, df.residual, logLik) 
+
+```
+
+```{r COMBINED}
+
+c.poLCA.PCV2 <- ReturnCoeffLCA(poLCA.PCV2)
+c.poLCA.PPV3 <- ReturnCoeffLCA(poLCA.PPV3)
+c.poLCA.PPV4 <- ReturnCoeffLCA(poLCA.PPV4)
+c.poLCA.PPV2 <- ReturnCoeffLCA(poLCA.PPV2)
+
+c.poLCA.PCV2_PPV2 <- ReturnCoeffLCA(poLCA.PCV2_PPV2)
+c.poLCA.PCV2_PPV2.Age <- ReturnCoeffLCA(poLCA.PCV2_PPV2.Age)
+c.poLCA.PCV2.PPV2 <- ReturnCoeffLCA(poLCA.PCV2.PPV2)
+c.poLCA.PCV2.PPV2.Age <- ReturnCoeffLCA(poLCA.PCV2.PPV2.Age)
+
+c.poLCA.PCV2_PPV3 <- ReturnCoeffLCA(poLCA.PCV2_PPV3)
+c.poLCA.PCV2.PPV3 <- ReturnCoeffLCA(poLCA.PCV2.PPV3)
+
+c.poLCA.PCV2_PPV4 <- ReturnCoeffLCA(poLCA.PCV2_PPV4)
+c.poLCA.PCV2.PPV4 <- ReturnCoeffLCA(poLCA.PCV2.PPV4)
+
+COMBINED <- rbind(
+    c.poLCA.PCV2,c.poLCA.PPV2,
+    c.poLCA.PPV3,c.poLCA.PPV4,
+    c.poLCA.PCV2_PPV2,c.poLCA.PCV2_PPV2.Age,
+    c.poLCA.PCV2.PPV2,c.poLCA.PCV2.PPV2.Age,
+    c.poLCA.PCV2_PPV3,c.poLCA.PCV2.PPV3,
+    c.poLCA.PCV2_PPV4,c.poLCA.PCV2.PPV4)
+
+COMBINED <- COMBINED %>%
+    mutate(Formula = str_remove(Formula,'f.LCA.10.')  )
+
+```
+
+## Model summary
+
+```{r, results='asis'}
+pander(SUMMARY)
+```
+
+## Model coefficients
+```{r, results='asis'}
+pander(COMBINED)
+```
+
+
+# Appendix
+
+## Details of LCA models
+
+### Base model
+No covariates are fitted here
+
+```{r, results = 'markup'}
+poLCA.Base
+```
+
+### Age
+
+```{r, results = 'markup'}
+poLCA.Age
+```
+
+### PCV2
+
+```{r, results = 'markup'}
+poLCA.PCV2
+```
+
+### PPV2
+
+```{r, results = 'markup'}
+poLCA.PPV2
+```
+
+### PPV3
+
+```{r, results = 'markup'}
+poLCA.PPV3
+```
+
+### PPV4
+
+```{r, results = 'markup'}
+poLCA.PPV4
+```
+
+### PCV2 + PPV2
+
+```{r, results = 'markup'}
+poLCA.PCV2.PPV2
+```
+
+### PCV2 * PPV2
+
+```{r, results = 'markup'}
+poLCA.PCV2_PPV2
+```
+
+### PCV2 + PPV2 + Age
+
+```{r, results = 'markup'}
+poLCA.PCV2.PPV2.Age
+```
+
+### PCV2 * PPV2 + Age
+
+```{r, results = 'markup'}
+poLCA.PCV2_PPV2.Age
+```
+
+### PCV2 + PPV3
+
+```{r, results = 'markup'}
+poLCA.PCV2.PPV3
+```
+
+### PCV2 * PPV3
+
+```{r, results = 'markup'}
+poLCA.PCV2_PPV3
+```
+
+### PCV2 + PPV4
+
+```{r, results = 'markup'}
+poLCA.PCV2.PPV4
+```
+
+### PCV2 * PPV4
+
+```{r, results = 'markup'}
+poLCA.PCV2_PPV4
+```
